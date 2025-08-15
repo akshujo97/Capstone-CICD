@@ -1,0 +1,9 @@
+# Terraform local state
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Local vars (may contain secrets)
+*.auto.tfvars
+terraform.tfvars

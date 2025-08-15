@@ -1,48 +1,60 @@
 terraform {
-  required_version = ">= 1.0"
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }
-  }
+  required_version = ">= 1.5"
+  required_providers { aws = { source = "hashicorp/aws", version = "~> 5.0" } }
 }
 
-provider "aws" {
-  region = var.aws_region
+provider "aws" { region = var.aws_region }
+
+data "aws_availability_zones" "az" {}
+
+resource "aws_vpc" "vpc" {
+  cidr_block           = "10.20.0.0/16"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+  tags                 = { Name = "resqpost-vpc" }
 }
 
-# Data sources
-data "aws_ami" "ubuntu" {
-  most_recent = true
-  owners      = ["099720109477"] # Canonical
-
-  filter {
-    name   = "name"
-    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
-  }
-
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
+resource "aws_internet_gateway" "igw" {
+  vpc_id = aws_vpc.vpc.id
 }
 
-# Security Group
-resource "aws_security_group" "resqpost_sg" {
-  name_prefix = "resqpost-sg"
-  description = "Security group for ResQPost application"
+resource "aws_subnet" "public" {
+  count                   = 2
+  vpc_id                  = aws_vpc.vpc.id
+  cidr_block              = cidrsubnet(aws_vpc.vpc.cidr_block, 4, count.index)
+  availability_zone       = data.aws_availability_zones.az.names[count.index]
+  map_public_ip_on_launch = true
+  tags                    = { Name = "resqpost-public-${count.index}" }
+}
+
+resource "aws_route_table" "public_rt" {
+  vpc_id = aws_vpc.vpc.id
+}
+
+resource "aws_route" "default" {
+  route_table_id         = aws_route_table.public_rt.id
+  destination_cidr_block = "0.0.0.0/0"
+  gateway_id             = aws_internet_gateway.igw.id
+}
+
+resource "aws_route_table_association" "assoc" {
+  count          = length(aws_subnet.public)
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public_rt.id
+}
+
+resource "aws_security_group" "app_sg" {
+  name   = "resqpost-app-sg"
+  vpc_id = aws_vpc.vpc.id
 
   ingress {
-    description = "SSH"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [var.allowed_ssh_cidr]
   }
 
   ingress {
-    description = "HTTP"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
@@ -50,25 +62,8 @@ resource "aws_security_group" "resqpost_sg" {
   }
 
   ingress {
-    description = "HTTPS" 
     from_port   = 443
     to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    description = "React Dev Server"
-    from_port   = 3000
-    to_port     = 3000
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    description = "Flask API"
-    from_port   = 5000
-    to_port     = 5000
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -79,50 +74,69 @@ resource "aws_security_group" "resqpost_sg" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+}
 
-  tags = {
-    Name = "resqpost-security-group"
+resource "aws_security_group" "rds_sg" {
+  name   = "resqpost-rds-sg"
+  vpc_id = aws_vpc.vpc.id
+
+  ingress {
+    from_port   = 5432
+    to_port     = 5432
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # demo only; tighten later
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 }
 
-# Key Pair
-resource "aws_key_pair" "resqpost_key" {
-  key_name   = "resqpost-key"
-  public_key = file(var.public_key_path)
+resource "aws_db_subnet_group" "dbsubnet" {
+  name       = "resqpost-dbsubnet"
+  subnet_ids = [for s in aws_subnet.public : s.id]
 }
 
-# EC2 Instance
-resource "aws_instance" "resqpost_server" {
-  ami           = data.aws_ami.ubuntu.id
-  instance_type = var.instance_type
-  
-  key_name               = aws_key_pair.resqpost_key.key_name
-  security_groups        = [aws_security_group.resqpost_sg.name]
-  
+resource "aws_db_instance" "pg" {
+  identifier             = "resqpost-pg"
+  engine                 = "postgres"
+  engine_version         = "15"
+  instance_class         = "db.t3.micro"
+  allocated_storage      = 20
+  db_subnet_group_name   = aws_db_subnet_group.dbsubnet.name
+  vpc_security_group_ids = [aws_security_group.rds_sg.id]
+  publicly_accessible    = true
+  username               = var.db_user
+  password               = var.db_password
+  db_name                = var.db_name
+  skip_final_snapshot    = true
+  deletion_protection    = false
+}
+
+data "aws_ssm_parameter" "al2023" {
+  name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
+}
+
+resource "aws_instance" "app" {
+  ami                         = data.aws_ssm_parameter.al2023.value
+  instance_type               = "t3.micro"
+  subnet_id                   = aws_subnet.public[0].id
+  vpc_security_group_ids      = [aws_security_group.app_sg.id]
   associate_public_ip_address = true
+  key_name                    = var.key_name
 
-  root_block_device {
-    volume_type = "gp3"
-    volume_size = var.volume_size
-    encrypted   = true
-  }
+  user_data = templatefile("${path.module}/user-data.sh", {
+    db_host        = aws_db_instance.pg.address
+    db_port        = aws_db_instance.pg.port
+    db_user        = var.db_user
+    db_password    = var.db_password
+    db_name        = var.db_name
+    backend_image  = var.backend_image
+    frontend_image = var.frontend_image
+  })
 
-  user_data = base64encode(templatefile("${path.module}/user-data.sh", {
-    docker_compose_version = "2.20.2"
-  }))
-
-  tags = {
-    Name = "resqpost-server"
-    Environment = var.environment
-  }
-}
-
-# Elastic IP
-resource "aws_eip" "resqpost_eip" {
-  instance = aws_instance.resqpost_server.id
-  domain   = "vpc"
-
-  tags = {
-    Name = "resqpost-elastic-ip"
-  }
+  tags = { Name = "resqpost-app" }
 }

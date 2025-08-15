@@ -1,29 +1,34 @@
 variable "aws_region" {
-  description = "AWS region"
-  type        = string
-  default     = "us-east-1"
+  type = string
 }
 
-variable "instance_type" {
-  description = "EC2 instance type"
-  type        = string
-  default     = "t3.micro"
+variable "allowed_ssh_cidr" {
+  type = string
 }
 
-variable "volume_size" {
-  description = "Root volume size in GB"
-  type        = number
-  default     = 20
+variable "db_user" {
+  type = string
 }
 
-variable "environment" {
-  description = "Environment name"
-  type        = string
-  default     = "production"
+variable "db_password" {
+  type      = string
+  sensitive = true
 }
 
-variable "public_key_path" {
-  description = "Path to the public key file"
-  type        = string
-  default     = "~/.ssh/id_rsa.pub"
+variable "db_name" {
+  type    = string
+  default = "resqpost"
+}
+
+variable "key_name" {
+  type    = string
+  default = null
+}
+
+variable "backend_image" {
+  type = string
+}
+
+variable "frontend_image" {
+  type = string
 }
